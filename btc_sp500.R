@@ -1,0 +1,252 @@
+# Load libraries
+library(tidyverse)
+library(ggthemes)
+library(forecast)
+
+library(tseries)
+library(gridExtra)
+
+library(rugarch)
+library(rmgarch)
+
+library(FinTS)
+# 引入zoo
+
+
+
+
+# ------------------------------------------------------------------------------
+# 1、导入感兴趣股票序列数据，需保证股票序列的长度相同
+# ------------------------------------------------------------------------------
+#导入数据BTC-USD.csv
+#数据1
+btcPrice = read.csv('C:/Users/Administrator/Desktop/dccgarch/dcc3/DigitalCoin10_RowData/BTC-USD.csv' ,
+                  header = T)
+BTC = btcPrice[,c('Date','Open')]
+
+# 转换成日期格式
+BTC$Date = as.Date(BTC$Date,"%Y-%m-%d")
+
+startday = BTC$Date[1]
+# str(BTC)
+# 比特币数据是从2014-9-17开始，且没有停牌，有2602个数据
+
+#数据2
+SP = read.csv('C:/Users/Administrator/Desktop/dccgarch/dcc3/Index/Volatility^VIX.csv' ,
+                    header = T)
+SP500 = SP[,c('Date','Open')]
+# 转换成日期格式
+SP500$Date = as.Date(SP500$Date,"%Y-%m-%d")
+SP500 = SP500[which(SP500$Date >= startday),]
+
+# names(SP500) <- c('date','sp500')
+# 切片提取
+# nrow(SP500)
+# s = SP500[(nrow(SP500)-2602):nrow(SP500),]
+
+
+# 将所有的数据按照日期合并，使得每个数据序列的日期相同
+mergedata <- merge(BTC, SP500, by="Date")
+
+# 抽取
+time = as.Date(mergedata$Date,"%Y-%m-%d")
+library(tseries)
+BTC_price = ts(mergedata$Open.x)    # 比特币价格序列
+SP_price = ts(mergedata$Open.y)     # S&P价格序列
+
+# *****
+# names = c('btc-price','S&P-price')  # 序列名称
+
+# ------------------------------------------------------------------------------
+#   作时序图观察序列的特性，如平稳性等
+#   计算一些基础统计量
+# ------------------------------------------------------------------------------
+# 时序图函数
+library(DistributionUtils)
+# 描述性统计量
+data_outline = function(x){
+  m = mean(x)
+  d=max(x)
+  xd=min(x)
+  me = median(x)
+  s = sd(x)
+  kur=kurtosis(x)
+  ske=skewness(x)
+  R = max(x)-min(x)
+  data.frame( Mean=m,  Median=me, max=d,min=xd,std_dev=s,
+              Skewness=ske, Kurtosis=kur, R=R)
+}
+
+view <- function(sequence1, sequence2, time, names){
+  ## 画出序列1和序列2的时序图,sequence1、sequence2必须是ts对象
+  ## names 序列名称，字符串形式，与序列对应
+  par(mfrow=c(1,2),oma=c(0.2,0.2,0.2,0.2))
+  # library(FinTS)
+  plot(zoo(sequence1, time), xlab="time(day)", ylab="price(USD)",
+       col = 'red',main = paste(names[1], "series"))
+  plot(zoo(sequence2, time), xlab="time(day)", ylab="price(USD)",
+       col = 'blue',main = paste(names[2], "series"))
+  # 描述性统计量
+  print("描述性统计量：")
+  print(data_outline(sequence1))
+  print(data_outline(sequence2))
+  ## 相关系数矩阵，提供参考
+  print("相关性系数：")
+  cor(sequence1,sequence2)
+}
+
+# view(BTC_price, SP_price, time, names)
+
+
+# ------------------------------------------------------------------------------
+# 2、序列平稳化(差分法)，采用对数收益差分
+# ------------------------------------------------------------------------------
+
+# 对数收益率
+BTC_rt = diff(log(BTC_price))  # 比特币价格序列
+SP_rt = diff(log(SP_price))    # S&P价格序列
+# ****** 
+names = c('btc-returns','S&P-returns')  # 序列名称
+
+
+view(BTC_rt, SP_rt, time, names)
+
+
+# ------------------------------------------------------------------------------
+#   平稳性检验,时序图观察只能作为参考,不能成为重要依据。
+#   Dickey-Fuller检验, 原假设是存在单位根，不平稳
+#   其他调用函数 ：urca.df或者FunitRoot.adfTest()
+# ------------------------------------------------------------------------------
+print(adf.test(BTC_rt, alt="stationary"))
+print(adf.test(SP_rt, alt="stationary")) 
+
+# ------------------------------------------------------------------------------
+#   白噪声检验，白噪声没有任何研究意义,判断和滞后项间是否存在相关性
+# ------------------------------------------------------------------------------
+print(Box.test(BTC_rt,lag=12 ,type = "Ljung-Box"))
+# 发现比特币是白噪声
+print(Box.test(SP_rt,lag=12 ,type = "Ljung-Box"))
+
+
+# ------------------------------------------------------------------------------
+#   3、对平稳序列均值方程建模
+# ------------------------------------------------------------------------------
+# 法一：做序列的acf和pacf图作为模型arma(p,q)定阶的参考，acf确定q,pacf确定p；
+# 由此来建立收益率模型，
+view_cf = function(sequence){
+  par(mfrow=c(1,2))
+  acf(sequence)
+  pacf(sequence)
+}
+view_cf(BTC_rt)
+view_cf(SP_rt)
+
+# 法二：但是forcast包里有更为简单的建立均值方程的方式，即调用auto.arima
+library(forecast)
+# arima模型根据AIC准则自动拟合收益率模型
+armamodel1=auto.arima(BTC_rt,ic = 'aic') 
+armamodel1   ## 查看序列1模型基础信息
+armamodel2=auto.arima(SP_rt,ic = 'aic')
+armamodel2   ## 查看序列2模型基础信息
+
+
+
+# # 不断尝试微调，直到残差能通过白噪声检验,追求完美可以去保证模型系数的显著性
+# # fixed = c(NA,NA,NA,0,0,NA,NA,NA)可以固定某些参数为0
+# armamodel3_medify<-arima(returns[,3], order = c(6,0,2),
+#                          include.mean = F)
+# summary(armamodel3_medify)
+# tsdiag(armamodel3_medify)  # 模型残差情况
+# confint(armamodel3_medify)  # 模型系数的显著性
+# resid(armamodel3_medify)
+# Box.test(residuals(armamodel3_medify),lag=30 , type = "Ljung-Box")
+
+
+# ------------------------------------------------------------------------------
+#   判断建立的均值的模型的好坏
+# ------------------------------------------------------------------------------
+# confint(armamodel2)
+# 提取残差进行白噪声检验(LB)检测残差的异方差性,检测时q值若小于显著水平，则拒绝，
+# 即拒绝序列无自相关性，否则接受，这里残差不存在自相关性
+Box.test(residuals(armamodel1),lag=30 ,type = "Ljung-Box")        
+Box.test(residuals(armamodel2),lag=30 , type = "Ljung-Box")
+
+# plot(residuals(armamodel1)^2)   # 可视化残差序列
+# pacf(residuals(armamodel1)^2)
+
+# ------------------------------------------------------------------------------
+#   4、进一步建模前准备：判断残差的异方差性，即方差是随着时间改变
+# -----------------------------------------------------------------------------
+# arch检验，判断是否有波动聚集现象或者异方差性，原假设是：不存在这样的现象
+# 进一步判断是否需要对方差进行建模
+
+# # 调用1：
+# # 残差的平方序列进行LB检验，原假设：序列间无自相关，近假设五期滞后不相关
+# Box.test(residuals(armamodel1)^2,lag=12,type = "Ljung-Box")
+# Box.test(residuals(armamodel2)^2,lag=12,type = "Ljung-Box")
+# Box.test(residuals(armamodel3)^2,lag=12,type = "Ljung-Box")
+
+
+# # 调用2：
+# #也可以使用FinTS.ArchTest()
+# # install.packages('MTS')
+# # library(MTS)
+# archTest(residuals(armamodel1),lag=12)
+# archTest(residuals(armamodel2),lag=12)
+# archTest(residuals(armamodel3),lag=12)
+
+# # 调用3：
+# 使用FinTS.ArchTest()
+library(FinTS)
+ArchTest(residuals(armamodel1), lag=5)
+ArchTest(residuals(armamodel2), lag=5)
+
+
+# ------------------------------------------------------------------------------
+#   5、dcc-garch模型,mgarch包
+# ------------------------------------------------------------------------------
+# 建立dcc模型(多变量相关性研究)
+meanSpec=list(armaOrder=c(0,0),include.mean=FALSE,archpow=1)
+distSpec=c("mvnorm")
+varSpec=list(model="sGARCH",garchOrder=c(1,1))
+
+# 单变量garch
+spec1=ugarchspec(mean.model=meanSpec,variance.model=varSpec)
+# 多变量garch
+mySpec=multispec(replicate(2,spec1))
+
+mspec=dccspec(mySpec,VAR=F,robust = F,lag=1,lag.max=NULL,
+              lag.criterion = c("AIC"),external.regressors = NULL,
+              robust.control = list(gamma=0.25,delta=0.01,nc=10,ns=500),
+              dccOrder = c(1,1),distribution = distSpec,
+              start.pars = list(),fixed.pars = list())
+# 查看模型
+mspec
+
+try = diff(log(ts(mergedata[,c(2,3)])))
+# dcc模型拟合
+dcc_fit=dccfit(data = try ,mspec,out.sample = 10,solver = "solnp",
+               solver.control = list(),
+               fit.control = list(eval.se=TRUE,stationary=TRUE,scale=FALSE),
+               parallel=TRUE,parallel.control=list(pkg=c("multicore"),cores=2),
+               fit=NULL,VAR.fit=NULL)
+
+# 查看拟合结果
+class(dcc_fit)
+show(dcc_fit)
+
+# 提取动态条件相关系数序列
+correlation12 = ts(rcor(dcc_fit, type = 'R')[1,2,])
+
+
+# 可视化动态动态相关曲线
+# palette()  # 查看调色板
+par(mfrow=c(1,1),oma=c(0.2,0.2,0.2,0.2))  
+plot(zoo(correlation12,time), xlab="time", ylab="coef",
+     col="red", main="dcc between btc and VIX")
+grid(lwd = 2,col = "gray")
+
+
+
+
+
